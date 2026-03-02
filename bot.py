@@ -208,7 +208,7 @@ def kb_main() -> InlineKeyboardMarkup:
         ],
         # 3 (выделенная)
         [
-            InlineKeyboardButton(text="🍗🔥 КНИГА РЕЦЕПТОВ", callback_data="recipes"),
+            InlineKeyboardButton(text="🍗 КНИГА РЕЦЕПТОВ", callback_data="recipes"),
         ],
         # 4 и 6
         [
@@ -217,7 +217,7 @@ def kb_main() -> InlineKeyboardMarkup:
         ],
         # 5 (выделенная)
         [
-            InlineKeyboardButton(text="🆘💬 ПОДДЕРЖКА", callback_data="support"),
+            InlineKeyboardButton(text="💬 ПОДДЕРЖКА", callback_data="support"),
         ],
     ])
 
@@ -826,3 +826,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
