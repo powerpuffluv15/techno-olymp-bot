@@ -41,11 +41,10 @@ MARKET_BUSINESS_ID = os.getenv("MARKET_BUSINESS_ID")  # "176784099"
 MARKET_CAMPAIGN_ID = os.getenv("MARKET_CAMPAIGN_ID")  # например "131508390"
 API_BASE = "https://api.partner.market.yandex.ru"
 
-# Хиты — ссылки (чтобы сразу работало, даже если API не даёт прямой url)
+# Хиты — ссылки на карточки (чтобы работало стабильно)
 _raw_hit_urls = os.getenv("HIT_CARD_URLS", "")
 HIT_CARD_URLS: List[str] = []
 if _raw_hit_urls.strip():
-    # поддержка: запятая, пробел, перенос строк
     parts = re.split(r"[\n,]+", _raw_hit_urls.strip())
     HIT_CARD_URLS = [p.strip() for p in parts if p.strip()]
 
@@ -56,6 +55,12 @@ WELCOME_IMG = "welcome.png"
 MAIN_MENU_IMG = "banner_main.png"
 
 OFFERS_CACHE_TTL_SEC = int(os.getenv("OFFERS_CACHE_TTL_SEC", "300"))  # 5 минут
+
+# ================== АКЦИОННЫЙ ТОВАР (канал + бонус) ==================
+SALE_CHANNEL_USERNAME = "@techno_Olymp_sale"
+SALE_CHANNEL_URL = "https://t.me/techno_Olymp_sale"
+SALE_BONUS_PROMO = "ОЛИМП10"  # твой промокод -10%
+SALE_DB_PATH = os.path.join(BASE_DIR, "sale_bonus_users.json")
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -99,6 +104,31 @@ def save_db(db: Dict[str, int]) -> None:
         logging.exception("Failed to write %s", DB_PATH)
 
 FORWARD_MAP = load_db()
+
+# ================== DB: бонус на акционный товар ==================
+def load_sale_db() -> Dict[str, bool]:
+    if not os.path.exists(SALE_DB_PATH):
+        return {}
+    try:
+        with open(SALE_DB_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): bool(v) for k, v in data.items()}
+    except Exception:
+        logging.exception("Failed to read %s", SALE_DB_PATH)
+        return {}
+
+def save_sale_db(db: Dict[str, bool]) -> None:
+    tmp = SALE_DB_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(db, f, ensure_ascii=False)
+        os.replace(tmp, SALE_DB_PATH)
+    except Exception:
+        logging.exception("Failed to write %s", SALE_DB_PATH)
+
+SALE_BONUS_USERS = load_sale_db()
 
 # ================== УТИЛИТЫ ==================
 def photo_file(filename: str) -> FSInputFile:
@@ -155,7 +185,12 @@ def kb_main() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎁 Промокод -5%", callback_data="promo"),
             InlineKeyboardButton(text="📘 Памятка", callback_data="memo"),
         ],
-        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
+        [
+            InlineKeyboardButton(text="⚡ Акционный товар", callback_data="sale"),
+        ],
+        [
+            InlineKeyboardButton(text="🆘 Поддержка", callback_data="support"),
+        ],
     ])
 
 def kb_back() -> InlineKeyboardMarkup:
@@ -244,7 +279,7 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
     if not offer_id:
         return None
 
-    name = offer.get("name") or item.get("name") or f"Товар"
+    name = offer.get("name") or item.get("name") or "Товар"
 
     photo_url = None
     pics = offer.get("pictures") or offer.get("images") or []
@@ -274,14 +309,10 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
     )
 
 def _is_offer_in_stock(offer_item: Dict[str, Any]) -> bool:
-    """
-    Очень "живучая" проверка наличия, т.к. поля в разных ответах отличаются.
-    """
     params = offer_item.get("offerParams") or offer_item.get("params") or {}
     if not isinstance(params, dict):
         params = {}
 
-    # распространённые варианты статусов
     cand = [
         params.get("status"),
         params.get("availability"),
@@ -291,28 +322,19 @@ def _is_offer_in_stock(offer_item: Dict[str, Any]) -> bool:
     ]
     cand_str = " ".join([str(x).lower() for x in cand if x is not None])
 
-    # если явно "нет в наличии" / "disabled" — false
     if any(w in cand_str for w in ["out", "нет", "no", "disabled", "archive", "off", "zero"]):
         return False
 
-    # если есть явные признаки что ок/активно/в продаже
     if any(w in cand_str for w in ["ok", "active", "published", "ready", "in_stock", "instock", "available", "on"]):
         return True
 
-    # иногда status пустой, но есть размещение/поставка
     if params.get("published") is True or params.get("hasStock") is True:
         return True
 
-    # по умолчанию — не считаем "в наличии", чтобы не показывать лишнее
     return False
 
 async def get_instock_offer_ids(offer_ids: List[str]) -> set[str]:
-    """
-    Возвращает set offerId, которые считаем "в наличии" для кампании.
-    Требует MARKET_CAMPAIGN_ID.
-    """
     if not MARKET_CAMPAIGN_ID:
-        # если не задано — не фильтруем
         return set(offer_ids)
 
     instock: set[str] = set()
@@ -356,13 +378,12 @@ async def get_offers(force: bool = False) -> List[Offer]:
                 if o:
                     offers.append(o)
 
-    # убираем дубликаты
     uniq: Dict[str, Offer] = {}
     for o in offers:
         uniq[o.offer_id] = o
     offers = list(uniq.values())
 
-    # --- ФИЛЬТР "ТОЛЬКО В НАЛИЧИИ" ---
+    # Только в наличии
     try:
         ids = [o.offer_id for o in offers]
         instock = await get_instock_offer_ids(ids)
@@ -400,6 +421,88 @@ async def start(m: Message, state: FSMContext):
 async def back(c: CallbackQuery, state: FSMContext):
     await state.clear()
     await show_main_menu(c.message)
+    await c.answer()
+
+# ================== АКЦИОННЫЙ ТОВАР (канал + бонус -10%) ==================
+@dp.callback_query(F.data == "sale")
+async def sale(c: CallbackQuery):
+    text = (
+        "⚡ <b>Акционный товар</b>\n\n"
+        "В этом канале мы публикуем предложения со скидкой:\n"
+        "• уценка (царапины / повреждена коробка)\n"
+        "• витринные образцы\n"
+        "• ограниченные акции\n\n"
+        "Подпишитесь на канал и нажмите «✅ Я подписался» — "
+        "получите <b>доп. скидку -10%</b> (1 раз)."
+    )
+    await c.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
+            [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_bonus")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+        ])
+    )
+    await c.answer()
+
+@dp.callback_query(F.data == "sale_bonus")
+async def sale_bonus(c: CallbackQuery):
+    user_id = str(c.from_user.id)
+
+    if SALE_BONUS_USERS.get(user_id):
+        await c.message.answer(
+            "✅ Бонус -10% уже был выдан ранее.\n\n"
+            "Канал с акциями 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📲 Канал с акциями", url=SALE_CHANNEL_URL)],
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+            ])
+        )
+        await c.answer()
+        return
+
+    # Проверка подписки (бот админ — работает)
+    try:
+        member = await bot.get_chat_member(SALE_CHANNEL_USERNAME, c.from_user.id)
+        if member.status not in ("member", "administrator", "creator"):
+            await c.message.answer(
+                "❌ Подписка не найдена.\n\n"
+                "Подпишитесь на канал и нажмите кнопку ещё раз 👇",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_bonus")],
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+                ])
+            )
+            await c.answer()
+            return
+    except Exception:
+        await c.message.answer(
+            "⚠️ Не удалось проверить подписку.\n\nПопробуйте ещё раз через минуту.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
+                [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_bonus")],
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+            ])
+        )
+        await c.answer()
+        return
+
+    SALE_BONUS_USERS[user_id] = True
+    save_sale_db(SALE_BONUS_USERS)
+
+    await c.message.answer(
+        "🎉 <b>Готово! Вам доступна доп. скидка -10%</b>\n\n"
+        f"Ваш промокод: <b>{SALE_BONUS_PROMO}</b>\n\n"
+        "Условия:\n"
+        "• 1 раз на пользователя\n"
+        "• может не суммироваться с другими акциями\n\n"
+        "Канал с акциями 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📲 Канал с акциями", url=SALE_CHANNEL_URL)],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+        ])
+    )
     await c.answer()
 
 # ================== НАШИ ТОВАРЫ ==================
@@ -449,18 +552,16 @@ async def shop_category(c: CallbackQuery):
 
 @dp.callback_query(F.data == "shop_hits")
 async def shop_hits(c: CallbackQuery):
-    # 1) показываем хиты ссылками (как ты дал)
     if HIT_CARD_URLS:
-        text_lines = "\n".join([f"• Хит {i+1}" for i in range(len(HIT_CARD_URLS))])
         rows = [[InlineKeyboardButton(text=f"🔥 Хит {i+1}", url=url)] for i, url in enumerate(HIT_CARD_URLS)]
         rows.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="shop")])
         rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")])
+
         await c.message.answer("🔥 <b>Хиты</b>\n\nОткрывайте товары по кнопкам 👇")
         await c.message.answer("Выберите хит:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await c.answer()
         return
 
-    # 2) если ссылки не заданы — показываем первые 10 в наличии
     try:
         offers = await get_offers()
     except Exception as e:
@@ -556,7 +657,7 @@ async def recipes(c: CallbackQuery):
     )
     await c.answer()
 
-# ================== ПРОМО ==================
+# ================== ПРОМО (-5%) ==================
 @dp.callback_query(F.data == "promo")
 async def promo(c: CallbackQuery):
     await c.message.answer_photo(
@@ -581,13 +682,13 @@ async def promo_check(c: CallbackQuery):
     except Exception:
         await c.message.answer(
             "⚠️ Не удалось проверить подписку.\n\n"
-            "Проверьте, что бот добавлен в канал (часто нужно дать права админа), и попробуйте ещё раз."
+            "Проверьте, что бот добавлен в канал и попробуйте ещё раз."
         )
         await c.answer()
         return
 
     await c.message.answer(
-        f"✅ Ваш персональный промокод:\n<b>{PROMO_CODE}</b>\n\n"
+        f"✅ Ваш промокод:\n<b>{PROMO_CODE}</b>\n\n"
         "⏳ Действует 1 месяц\n"
         "⚠️ Не суммируется с другими промокодами"
     )
