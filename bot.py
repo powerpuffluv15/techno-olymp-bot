@@ -75,7 +75,7 @@ async def start(m: Message):
     photo = FSInputFile("welcome.png")
     await m.answer_photo(
         photo=photo,
-        caption="🤖 <b>Техно Олимп Бот</b>\n\nВыберите раздел ниже 👇",
+        caption="🤖 <b>Техно Олимп Бот v2</b>\n\nВыберите раздел ниже 👇",
         reply_markup=kb_main()
     )
 
@@ -201,4 +201,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
