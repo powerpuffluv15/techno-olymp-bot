@@ -23,17 +23,32 @@ from aiogram.types import (
     Message,
 )
 
-# ================== НАСТРОЙКИ ==================
+# ================== BASE / PATHS ==================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ================== ENV / SETTINGS ==================
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN not found in Railway Variables")
 
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "-5255685384"))
 
+# Канал рецептов
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@techno_recept")
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/techno_recept")
+
+# Магазин
 SHOP_URL = os.getenv("SHOP_URL", "https://market.yandex.ru/business--tekhno-olimp/176784099")
+
+# Промокод -5% (за канал рецептов)
 PROMO_CODE = os.getenv("PROMO_CODE", "W39AMMMC")
+
+# Акционный товар (ваш канал)
+SALE_CHANNEL_USERNAME = os.getenv("SALE_CHANNEL_USERNAME", "@techno_Olymp_sale")
+SALE_CHANNEL_URL = os.getenv("SALE_CHANNEL_URL", "https://t.me/techno_Olymp_sale")
+
+# Промокод -10% (за акционный канал) — как вы просили
+SALE_BONUS_PROMO = os.getenv("SALE_BONUS_PROMO", "ОЛИМП10")
 
 # Яндекс Маркет (Partner API)
 MARKET_API_KEY = os.getenv("MARKET_API_KEY")
@@ -41,25 +56,32 @@ MARKET_BUSINESS_ID = os.getenv("MARKET_BUSINESS_ID")  # "176784099"
 MARKET_CAMPAIGN_ID = os.getenv("MARKET_CAMPAIGN_ID")  # например "131508390"
 API_BASE = "https://api.partner.market.yandex.ru"
 
-# Хиты — ссылки на карточки (чтобы работало стабильно)
+OFFERS_CACHE_TTL_SEC = int(os.getenv("OFFERS_CACHE_TTL_SEC", "300"))  # 5 минут
+
+# Хиты — ссылки на карточки (передавать через Railway Variable HIT_CARD_URLS, по одной ссылке на строку)
 _raw_hit_urls = os.getenv("HIT_CARD_URLS", "")
 HIT_CARD_URLS: List[str] = []
 if _raw_hit_urls.strip():
     parts = re.split(r"[\n,]+", _raw_hit_urls.strip())
     HIT_CARD_URLS = [p.strip() for p in parts if p.strip()]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ================== FILES ==================
 DB_PATH = os.path.join(BASE_DIR, "forward_map.json")
 
 WELCOME_IMG = "welcome.png"
 MAIN_MENU_IMG = "banner_main.png"
 
-OFFERS_CACHE_TTL_SEC = int(os.getenv("OFFERS_CACHE_TTL_SEC", "300"))  # 5 минут
+BANNER_SHOP = "banner_shop.png"
+BANNER_RECIPES = "banner_recipes.png"
+BANNER_PROMO = "banner_promo.png"
+BANNER_MEMO = "banner_memo.png"
+BANNER_SUPPORT = "banner_support.png"
 
-# ================== АКЦИОННЫЙ ТОВАР (канал + бонус) ==================
-SALE_CHANNEL_USERNAME = "@techno_Olymp_sale"
-SALE_CHANNEL_URL = "https://t.me/techno_Olymp_sale"
-SALE_BONUS_PROMO = "ОЛИМП10"  # твой промокод -10%
+# Акционный товар баннеры (положить рядом с bot.py)
+BANNER_SALE = "banner_sale.png"
+BANNER_SALE_PROMO = "banner_sale_promo.png"
+
+# База для "выдать -10% один раз"
 SALE_DB_PATH = os.path.join(BASE_DIR, "sale_bonus_users.json")
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -72,7 +94,7 @@ class SupportFlow(StatesGroup):
 class ShopSearchFlow(StatesGroup):
     waiting_query = State()
 
-# ================== МОДЕЛЬ ТОВАРА ==================
+# ================== MODELS ==================
 @dataclass
 class Offer:
     offer_id: str
@@ -80,7 +102,7 @@ class Offer:
     photo_url: Optional[str]
     url: Optional[str]
 
-# ================== DB (reply map) ==================
+# ================== DB (support forward map) ==================
 def load_db() -> Dict[str, int]:
     if not os.path.exists(DB_PATH):
         return {}
@@ -105,7 +127,7 @@ def save_db(db: Dict[str, int]) -> None:
 
 FORWARD_MAP = load_db()
 
-# ================== DB: бонус на акционный товар ==================
+# ================== DB (sale bonus one-time) ==================
 def load_sale_db() -> Dict[str, bool]:
     if not os.path.exists(SALE_DB_PATH):
         return {}
@@ -130,7 +152,7 @@ def save_sale_db(db: Dict[str, bool]) -> None:
 
 SALE_BONUS_USERS = load_sale_db()
 
-# ================== УТИЛИТЫ ==================
+# ================== UTILS ==================
 def photo_file(filename: str) -> FSInputFile:
     return FSInputFile(os.path.join(BASE_DIR, filename))
 
@@ -145,26 +167,23 @@ def safe_https(url: Optional[str]) -> Optional[str]:
     return "https://" + url.lstrip("/")
 
 def store_search_url(query: str) -> str:
-    """Поиск ВНУТРИ твоего магазина по businessId."""
+    """Поиск ВНУТРИ магазина по businessId."""
     bid = MARKET_BUSINESS_ID or "176784099"
     return f"https://market.yandex.ru/search?text={quote_plus(query)}&businessId={bid}"
 
-# ================== КАТЕГОРИИ (расширено) ==================
+# ================== CATEGORY DETECT ==================
 def detect_category(name: str) -> str:
     n = name.lower()
 
     if any(w in n for w in ["аэрогрил", "air fryer"]):
         return "aerogrill"
-
     if any(w in n for w in ["пылесос", "vacuum"]):
         return "vacuum"
-
     if any(w in n for w in [
         "пароочист", "пароочиститель", "пароген", "паровая швабра", "парошвабр",
         "steam", "steam mop", "steam cleaner", "отпаривател", "паровой"
     ]):
         return "steam"
-
     return "other"
 
 CAT_TITLES = {
@@ -174,28 +193,37 @@ CAT_TITLES = {
     "other": "📦 Другое",
 }
 
-# ================== КЛАВИАТУРЫ ==================
+# ================== KEYBOARDS ==================
 def kb_main() -> InlineKeyboardMarkup:
+    """
+    Требование:
+    - Книга рецептов = 3-я по счёту и выделена (широкая кнопка)
+    - Поддержка = 5-я по счёту и выделена (широкая кнопка)
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
+        # 1 и 2
         [
             InlineKeyboardButton(text="🛒 Наши товары", callback_data="shop"),
-            InlineKeyboardButton(text="🍗 Книга рецептов", callback_data="recipes"),
+            InlineKeyboardButton(text="⚡ Акционный товар", callback_data="sale"),
         ],
+        # 3 (выделенная)
+        [
+            InlineKeyboardButton(text="🍗🔥 КНИГА РЕЦЕПТОВ", callback_data="recipes"),
+        ],
+        # 4 и 6
         [
             InlineKeyboardButton(text="🎁 Промокод -5%", callback_data="promo"),
             InlineKeyboardButton(text="📘 Памятка", callback_data="memo"),
         ],
+        # 5 (выделенная)
         [
-            InlineKeyboardButton(text="⚡ Акционный товар", callback_data="sale"),
-        ],
-        [
-            InlineKeyboardButton(text="🆘 Поддержка", callback_data="support"),
+            InlineKeyboardButton(text="🆘💬 ПОДДЕРЖКА", callback_data="support"),
         ],
     ])
 
-def kb_back() -> InlineKeyboardMarkup:
+def kb_back_to_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
     ])
 
 def kb_shop_categories() -> InlineKeyboardMarkup:
@@ -228,7 +256,7 @@ def kb_offer_nav(mode: str, index: int, total: int, url: str) -> InlineKeyboardM
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
     ])
 
-# ================== ЭКРАНЫ ==================
+# ================== SCREENS ==================
 async def show_welcome(m: Message):
     try:
         await m.answer_photo(
@@ -249,10 +277,10 @@ async def show_main_menu(msg: Message):
     except Exception:
         await msg.answer("🏠 <b>Главное меню</b>\n\nВыберите раздел 👇", reply_markup=kb_main())
 
-# ================== СЕССИИ ТОВАРОВ (для листания) ==================
+# ================== SHOP SESSION (pagination) ==================
 USER_SHOP_SESSION: dict[int, dict] = {}
 
-# ================== ЯНДЕКС API ==================
+# ================== MARKET API ==================
 _OFFERS_CACHE: Tuple[float, List[Offer]] = (0.0, [])
 
 async def market_post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -378,12 +406,10 @@ async def get_offers(force: bool = False) -> List[Offer]:
                 if o:
                     offers.append(o)
 
-    uniq: Dict[str, Offer] = {}
-    for o in offers:
-        uniq[o.offer_id] = o
+    uniq: Dict[str, Offer] = {o.offer_id: o for o in offers}
     offers = list(uniq.values())
 
-    # Только в наличии
+    # фильтр "только в наличии"
     try:
         ids = [o.offer_id for o in offers]
         instock = await get_instock_offer_ids(ids)
@@ -395,10 +421,10 @@ async def get_offers(force: bool = False) -> List[Offer]:
     _OFFERS_CACHE = (now, offers)
     return offers
 
-# ================== ТОВАР: отправка карточки ==================
+# ================== SEND OFFER CARD ==================
 async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int):
     url = offer.url or store_search_url(offer.name)
-    caption = f"<b>{offer.name}</b>"  # ID НЕ показываем
+    caption = f"<b>{offer.name}</b>"  # ID не показываем
     kb = kb_offer_nav(mode=mode, index=index, total=total, url=url)
 
     if offer.photo_url:
@@ -406,12 +432,11 @@ async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: i
     else:
         await msg.answer(text=caption, reply_markup=kb)
 
-# ================== СЛУЖЕБНОЕ ==================
+# ================== HANDLERS ==================
 @dp.callback_query(F.data == "noop")
 async def noop(c: CallbackQuery):
     await c.answer()
 
-# ================== START / BACK ==================
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
@@ -423,45 +448,57 @@ async def back(c: CallbackQuery, state: FSMContext):
     await show_main_menu(c.message)
     await c.answer()
 
-# ================== АКЦИОННЫЙ ТОВАР (канал + бонус -10%) ==================
+# ================== АКЦИОННЫЙ ТОВАР ==================
 @dp.callback_query(F.data == "sale")
-async def sale(c: CallbackQuery):
+async def sale(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     text = (
         "⚡ <b>Акционный товар</b>\n\n"
-        "В этом канале мы публикуем предложения со скидкой:\n"
+        "Здесь мы публикуем предложения со скидкой:\n"
         "• уценка (царапины / повреждена коробка)\n"
         "• витринные образцы\n"
         "• ограниченные акции\n\n"
-        "Подпишитесь на канал и нажмите «✅ Я подписался» — "
-        "получите <b>доп. скидку -10%</b> (1 раз)."
+        "Подпишитесь на канал и нажмите «✅ Я подписался» — получите <b>-10%</b> (1 раз)."
     )
-    await c.message.answer(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
-            [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_bonus")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
-        ])
-    )
+    try:
+        await c.message.answer_photo(
+            photo=photo_file(BANNER_SALE),
+            caption=text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
+                [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_check")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
+            ])
+        )
+    except Exception:
+        await c.message.answer(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
+                [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_check")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
+            ])
+        )
     await c.answer()
 
-@dp.callback_query(F.data == "sale_bonus")
-async def sale_bonus(c: CallbackQuery):
+@dp.callback_query(F.data == "sale_check")
+async def sale_check(c: CallbackQuery):
     user_id = str(c.from_user.id)
 
+    # уже выдавали
     if SALE_BONUS_USERS.get(user_id):
         await c.message.answer(
             "✅ Бонус -10% уже был выдан ранее.\n\n"
             "Канал с акциями 👇",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📲 Канал с акциями", url=SALE_CHANNEL_URL)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
             ])
         )
         await c.answer()
         return
 
-    # Проверка подписки (бот админ — работает)
+    # проверяем подписку (бот должен быть админом канала)
     try:
         member = await bot.get_chat_member(SALE_CHANNEL_USERNAME, c.from_user.id)
         if member.status not in ("member", "administrator", "creator"):
@@ -470,8 +507,8 @@ async def sale_bonus(c: CallbackQuery):
                 "Подпишитесь на канал и нажмите кнопку ещё раз 👇",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
-                    [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_bonus")],
-                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+                    [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_check")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
                 ])
             )
             await c.answer()
@@ -481,28 +518,46 @@ async def sale_bonus(c: CallbackQuery):
             "⚠️ Не удалось проверить подписку.\n\nПопробуйте ещё раз через минуту.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
-                [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_bonus")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+                [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_check")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
             ])
         )
         await c.answer()
         return
 
+    # фиксируем выдачу один раз
     SALE_BONUS_USERS[user_id] = True
     save_sale_db(SALE_BONUS_USERS)
 
-    await c.message.answer(
-        "🎉 <b>Готово! Вам доступна доп. скидка -10%</b>\n\n"
-        f"Ваш промокод: <b>{SALE_BONUS_PROMO}</b>\n\n"
-        "Условия:\n"
-        "• 1 раз на пользователя\n"
-        "• может не суммироваться с другими акциями\n\n"
-        "Канал с акциями 👇",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📲 Канал с акциями", url=SALE_CHANNEL_URL)],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
-        ])
-    )
+    # ✅ отправляем картинку промокода + текст (как вы просили)
+    try:
+        await c.message.answer_photo(
+            photo=photo_file(BANNER_SALE_PROMO),
+            caption=(
+                "🎉 <b>Поздравляем!</b>\n\n"
+                "Ваш промокод на <b>-10%</b>:\n"
+                f"<b>{SALE_BONUS_PROMO}</b>\n\n"
+                "⏳ Действует 7 дней\n"
+                "⚠️ Не суммируется с другими акциями"
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 Перейти в магазин", url=SHOP_URL)],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
+            ])
+        )
+    except Exception:
+        await c.message.answer(
+            "🎉 <b>Поздравляем!</b>\n\n"
+            "Ваш промокод на <b>-10%</b>:\n"
+            f"<b>{SALE_BONUS_PROMO}</b>\n\n"
+            "⏳ Действует 7 дней\n"
+            "⚠️ Не суммируется с другими акциями",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 Перейти в магазин", url=SHOP_URL)],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
+            ])
+        )
+
     await c.answer()
 
 # ================== НАШИ ТОВАРЫ ==================
@@ -511,7 +566,7 @@ async def shop_menu(c: CallbackQuery, state: FSMContext):
     await state.clear()
     try:
         await c.message.answer_photo(
-            photo=photo_file("banner_shop.png"),
+            photo=photo_file(BANNER_SHOP),
             caption="🛒 <b>Наши товары</b>\n\nВыберите категорию или действие 👇",
             reply_markup=kb_shop_categories()
         )
@@ -644,29 +699,31 @@ async def shop_show(c: CallbackQuery):
     await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers))
     await c.answer()
 
-# ================== РЕЦЕПТЫ ==================
+# ================== КНИГА РЕЦЕПТОВ ==================
 @dp.callback_query(F.data == "recipes")
-async def recipes(c: CallbackQuery):
+async def recipes(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     await c.message.answer_photo(
-        photo=photo_file("banner_recipes.png"),
+        photo=photo_file(BANNER_RECIPES),
         caption="🍗 <b>Книга рецептов для аэрогриля</b>\n\nПодписывайтесь 👇",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📲 Открыть канал", url=CHANNEL_URL)],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
         ])
     )
     await c.answer()
 
-# ================== ПРОМО (-5%) ==================
+# ================== ПРОМО -5% ==================
 @dp.callback_query(F.data == "promo")
-async def promo(c: CallbackQuery):
+async def promo(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     await c.message.answer_photo(
-        photo=photo_file("banner_promo.png"),
+        photo=photo_file(BANNER_PROMO),
         caption="🎁 <b>Получите скидку -5%</b>\n\nПодпишитесь и нажмите «Я подписался» 👇",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📲 Подписаться", url=CHANNEL_URL)],
             [InlineKeyboardButton(text="✅ Я подписался", callback_data="promo_check")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
         ])
     )
     await c.answer()
@@ -690,22 +747,24 @@ async def promo_check(c: CallbackQuery):
     await c.message.answer(
         f"✅ Ваш промокод:\n<b>{PROMO_CODE}</b>\n\n"
         "⏳ Действует 1 месяц\n"
-        "⚠️ Не суммируется с другими промокодами"
+        "⚠️ Не суммируется с другими промокодами",
+        reply_markup=kb_back_to_menu()
     )
     await c.answer()
 
 # ================== ПАМЯТКА ==================
 @dp.callback_query(F.data == "memo")
-async def memo(c: CallbackQuery):
+async def memo(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     await c.message.answer_photo(
-        photo=photo_file("banner_memo.png"),
+        photo=photo_file(BANNER_MEMO),
         caption="📘 <b>Памятка по аэрогрилю</b>\n\n"
                 "• Не заполняйте чашу более 70%\n"
                 "• Прогрейте перед первым использованием\n"
                 "• Переворачивайте продукты\n",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
         ])
     )
     await c.answer()
@@ -715,9 +774,11 @@ async def memo(c: CallbackQuery):
 async def support(c: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.waiting_message)
     await c.message.answer_photo(
-        photo=photo_file("banner_support.png"),
+        photo=photo_file(BANNER_SUPPORT),
         caption="✍️ Напишите сообщение в поддержку.\n\nУкажите номер заказа и описание проблемы.",
-        reply_markup=kb_back()
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
+        ])
     )
     await c.answer()
 
@@ -731,7 +792,7 @@ async def support_message(m: Message, state: FSMContext):
     FORWARD_MAP[str(forwarded.message_id)] = m.from_user.id
     save_db(FORWARD_MAP)
 
-    await m.answer("✅ Сообщение отправлено в поддержку.")
+    await m.answer("✅ Сообщение отправлено в поддержку.", reply_markup=kb_back_to_menu())
     await state.clear()
 
 # ================== RUN ==================
@@ -741,6 +802,7 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
+    # На Railway используем polling — webhook чистим
     await bot.delete_webhook(drop_pending_updates=True)
 
     try:
@@ -753,7 +815,7 @@ async def main():
     if not MARKET_API_KEY or not MARKET_BUSINESS_ID:
         logging.warning("Market API env not set: MARKET_API_KEY / MARKET_BUSINESS_ID")
     if not MARKET_CAMPAIGN_ID:
-        logging.warning("MARKET_CAMPAIGN_ID not set -> stock filter will be disabled")
+        logging.warning("MARKET_CAMPAIGN_ID not set -> stock filter may be weaker")
 
     await dp.start_polling(
         bot,
