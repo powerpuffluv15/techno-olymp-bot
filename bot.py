@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,7 +12,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramUnauthorizedError
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -37,13 +38,16 @@ PROMO_CODE = os.getenv("PROMO_CODE", "W39AMMMC")
 # Яндекс Маркет (Partner API)
 MARKET_API_KEY = os.getenv("MARKET_API_KEY")
 MARKET_BUSINESS_ID = os.getenv("MARKET_BUSINESS_ID")  # "176784099"
+MARKET_CAMPAIGN_ID = os.getenv("MARKET_CAMPAIGN_ID")  # например "131508390"
 API_BASE = "https://api.partner.market.yandex.ru"
 
-# Хиты (ручная настройка, самый стабильный вариант)
-HIT_OFFER_IDS = [x.strip() for x in (os.getenv("HIT_OFFER_IDS", "")).split(",") if x.strip()]
-
-# Админ (опционально): только админ видит кнопку "Добавить в хиты"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # поставь свой tg id, чтобы включить админ-кнопку
+# Хиты — ссылки (чтобы сразу работало, даже если API не даёт прямой url)
+_raw_hit_urls = os.getenv("HIT_CARD_URLS", "")
+HIT_CARD_URLS: List[str] = []
+if _raw_hit_urls.strip():
+    # поддержка: запятая, пробел, перенос строк
+    parts = re.split(r"[\n,]+", _raw_hit_urls.strip())
+    HIT_CARD_URLS = [p.strip() for p in parts if p.strip()]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "forward_map.json")
@@ -111,13 +115,11 @@ def safe_https(url: Optional[str]) -> Optional[str]:
     return "https://" + url.lstrip("/")
 
 def store_search_url(query: str) -> str:
-    """
-    Поиск ВНУТРИ твоего магазина (по businessId), а не общий поиск Маркета.
-    """
+    """Поиск ВНУТРИ твоего магазина по businessId."""
     bid = MARKET_BUSINESS_ID or "176784099"
     return f"https://market.yandex.ru/search?text={quote_plus(query)}&businessId={bid}"
 
-# ================== КАТЕГОРИИ (расширено, чтобы не было пусто) ==================
+# ================== КАТЕГОРИИ (расширено) ==================
 def detect_category(name: str) -> str:
     n = name.lower()
 
@@ -173,7 +175,7 @@ def kb_shop_categories() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
     ])
 
-def kb_offer_nav(mode: str, index: int, total: int, url: str, offer_id: str, is_admin: bool) -> InlineKeyboardMarkup:
+def kb_offer_nav(mode: str, index: int, total: int, url: str) -> InlineKeyboardMarkup:
     prev_i = max(index - 1, 0)
     next_i = min(index + 1, max(total - 1, 0))
 
@@ -184,21 +186,12 @@ def kb_offer_nav(mode: str, index: int, total: int, url: str, offer_id: str, is_
     if total > 1 and index < total - 1:
         nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"shop_show:{mode}:{next_i}"))
 
-    rows = [
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Открыть", url=url)],
         nav_row,
-    ]
-
-    # Админская кнопка: добавить в хиты (покупателю не показываем)
-    if is_admin:
-        rows.append([InlineKeyboardButton(text="⭐ Добавить в хиты", callback_data=f"hit_add:{offer_id}")])
-
-    rows.extend([
         [InlineKeyboardButton(text="⬅️ К категориям", callback_data="shop")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
     ])
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ================== ЭКРАНЫ ==================
 async def show_welcome(m: Message):
@@ -227,7 +220,7 @@ USER_SHOP_SESSION: dict[int, dict] = {}
 # ================== ЯНДЕКС API ==================
 _OFFERS_CACHE: Tuple[float, List[Offer]] = (0.0, [])
 
-async def market_request(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+async def market_post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
     if not MARKET_API_KEY or not MARKET_BUSINESS_ID:
         raise RuntimeError("MARKET_API_KEY / MARKET_BUSINESS_ID not set in Railway Variables")
 
@@ -242,9 +235,6 @@ async def market_request(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             return data
 
 def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
-    """
-    Парсер сделан "живучим", т.к. поля могут отличаться.
-    """
     offer = item.get("offer") or item.get("mappedOffer") or {}
     if not isinstance(offer, dict):
         offer = {}
@@ -254,7 +244,7 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
     if not offer_id:
         return None
 
-    name = offer.get("name") or item.get("name") or f"Товар {offer_id}"
+    name = offer.get("name") or item.get("name") or f"Товар"
 
     photo_url = None
     pics = offer.get("pictures") or offer.get("images") or []
@@ -283,6 +273,66 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
         url=safe_https(url),
     )
 
+def _is_offer_in_stock(offer_item: Dict[str, Any]) -> bool:
+    """
+    Очень "живучая" проверка наличия, т.к. поля в разных ответах отличаются.
+    """
+    params = offer_item.get("offerParams") or offer_item.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+
+    # распространённые варианты статусов
+    cand = [
+        params.get("status"),
+        params.get("availability"),
+        params.get("stock"),
+        offer_item.get("status"),
+        offer_item.get("availability"),
+    ]
+    cand_str = " ".join([str(x).lower() for x in cand if x is not None])
+
+    # если явно "нет в наличии" / "disabled" — false
+    if any(w in cand_str for w in ["out", "нет", "no", "disabled", "archive", "off", "zero"]):
+        return False
+
+    # если есть явные признаки что ок/активно/в продаже
+    if any(w in cand_str for w in ["ok", "active", "published", "ready", "in_stock", "instock", "available", "on"]):
+        return True
+
+    # иногда status пустой, но есть размещение/поставка
+    if params.get("published") is True or params.get("hasStock") is True:
+        return True
+
+    # по умолчанию — не считаем "в наличии", чтобы не показывать лишнее
+    return False
+
+async def get_instock_offer_ids(offer_ids: List[str]) -> set[str]:
+    """
+    Возвращает set offerId, которые считаем "в наличии" для кампании.
+    Требует MARKET_CAMPAIGN_ID.
+    """
+    if not MARKET_CAMPAIGN_ID:
+        # если не задано — не фильтруем
+        return set(offer_ids)
+
+    instock: set[str] = set()
+    CHUNK = 200
+
+    for i in range(0, len(offer_ids), CHUNK):
+        chunk = offer_ids[i:i + CHUNK]
+        data = await market_post(
+            f"/v2/campaigns/{MARKET_CAMPAIGN_ID}/offers",
+            {"offerIds": chunk}
+        )
+        items = (data.get("result") or {}).get("offers") or []
+        if isinstance(items, list):
+            for it in items:
+                oid = str(it.get("offerId", "")).strip()
+                if oid and _is_offer_in_stock(it):
+                    instock.add(oid)
+
+    return instock
+
 async def get_offers(force: bool = False) -> List[Offer]:
     global _OFFERS_CACHE
     ts, cached = _OFFERS_CACHE
@@ -291,11 +341,10 @@ async def get_offers(force: bool = False) -> List[Offer]:
     if (not force) and cached and (now - ts) < OFFERS_CACHE_TTL_SEC:
         return cached
 
-    data = await market_request(
+    data = await market_post(
         f"/v2/businesses/{MARKET_BUSINESS_ID}/offer-mappings",
         {"limit": 200}
     )
-
     result = data.get("result", {})
     raw_items = result.get("offerMappings") or result.get("offerMappingEntries") or []
 
@@ -307,26 +356,29 @@ async def get_offers(force: bool = False) -> List[Offer]:
                 if o:
                     offers.append(o)
 
+    # убираем дубликаты
     uniq: Dict[str, Offer] = {}
     for o in offers:
         uniq[o.offer_id] = o
-
     offers = list(uniq.values())
-    offers.sort(key=lambda x: x.name.lower())
 
+    # --- ФИЛЬТР "ТОЛЬКО В НАЛИЧИИ" ---
+    try:
+        ids = [o.offer_id for o in offers]
+        instock = await get_instock_offer_ids(ids)
+        offers = [o for o in offers if o.offer_id in instock]
+    except Exception:
+        logging.exception("Failed to filter by stock; showing unfiltered offers")
+
+    offers.sort(key=lambda x: x.name.lower())
     _OFFERS_CACHE = (now, offers)
     return offers
 
 # ================== ТОВАР: отправка карточки ==================
-async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int, user_id: int):
-    # ссылка либо из API, либо поиск ВНУТРИ магазина
+async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int):
     url = offer.url or store_search_url(offer.name)
-
-    # ID не показываем покупателю
-    caption = f"<b>{offer.name}</b>"
-
-    is_admin = (ADMIN_ID != 0 and user_id == ADMIN_ID)
-    kb = kb_offer_nav(mode=mode, index=index, total=total, url=url, offer_id=offer.offer_id, is_admin=is_admin)
+    caption = f"<b>{offer.name}</b>"  # ID НЕ показываем
+    kb = kb_offer_nav(mode=mode, index=index, total=total, url=url)
 
     if offer.photo_url:
         await msg.answer_photo(photo=offer.photo_url, caption=caption, reply_markup=kb)
@@ -338,17 +390,12 @@ async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: i
 async def noop(c: CallbackQuery):
     await c.answer()
 
-@dp.message(Command("getid"))
-async def getid(m: Message):
-    await m.answer(f"Ваш id: <code>{m.from_user.id}</code>")
-
-# ================== START ==================
+# ================== START / BACK ==================
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
     await show_welcome(m)
 
-# ================== НАВИГАЦИЯ ==================
 @dp.callback_query(F.data == "back")
 async def back(c: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -375,64 +422,61 @@ async def shop_category(c: CallbackQuery):
     try:
         offers = await get_offers()
     except Exception as e:
-        await c.message.answer(f"⚠️ Не удалось загрузить товары из Маркета.\n{e}")
+        await c.message.answer(f"⚠️ Не удалось загрузить товары.\n{e}")
         await c.answer()
         return
 
     filtered = [o for o in offers if detect_category(o.name) == cat]
     if not filtered:
-        await c.message.answer("В этой категории пока нет товаров. Попробуйте «Другое» или поиск.")
+        await c.message.answer("В этой категории пока нет товаров в наличии. Попробуйте «Другое» или поиск.")
         await c.answer()
         return
 
     title = CAT_TITLES.get(cat, "Категория")
-
     top = filtered[:10]
     lines = "\n".join([f"{i+1}. {o.name}" for i, o in enumerate(top)])
 
     await c.message.answer(
         f"<b>{title}</b>\n\n<b>Подборка:</b>\n{lines}\n\n"
-        f"Найдено: <b>{len(filtered)}</b>\n"
+        f"В наличии: <b>{len(filtered)}</b>\n"
         "Листай карточки ◀️▶️ ниже 👇"
     )
 
     mode = f"cat_{cat}"
     USER_SHOP_SESSION[c.from_user.id] = {"mode": mode, "offers": filtered}
-
-    await send_offer(c.message, filtered[0], mode=mode, index=0, total=len(filtered), user_id=c.from_user.id)
+    await send_offer(c.message, filtered[0], mode=mode, index=0, total=len(filtered))
     await c.answer()
 
 @dp.callback_query(F.data == "shop_hits")
 async def shop_hits(c: CallbackQuery):
-    try:
-        offers = await get_offers()
-    except Exception as e:
-        await c.message.answer(f"⚠️ Не удалось загрузить товары из Маркета.\n{e}")
+    # 1) показываем хиты ссылками (как ты дал)
+    if HIT_CARD_URLS:
+        text_lines = "\n".join([f"• Хит {i+1}" for i in range(len(HIT_CARD_URLS))])
+        rows = [[InlineKeyboardButton(text=f"🔥 Хит {i+1}", url=url)] for i, url in enumerate(HIT_CARD_URLS)]
+        rows.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="shop")])
+        rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")])
+        await c.message.answer("🔥 <b>Хиты</b>\n\nОткрывайте товары по кнопкам 👇")
+        await c.message.answer("Выберите хит:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await c.answer()
         return
 
-    if HIT_OFFER_IDS:
-        hits = [o for o in offers if o.offer_id in HIT_OFFER_IDS]
-    else:
-        hits = offers[:10]
+    # 2) если ссылки не заданы — показываем первые 10 в наличии
+    try:
+        offers = await get_offers()
+    except Exception as e:
+        await c.message.answer(f"⚠️ Не удалось загрузить товары.\n{e}")
+        await c.answer()
+        return
 
+    hits = offers[:10]
     if not hits:
         await c.message.answer("🔥 Хиты пока пустые.")
         await c.answer()
         return
 
     USER_SHOP_SESSION[c.from_user.id] = {"mode": "hits", "offers": hits}
-
-    if HIT_OFFER_IDS:
-        await c.message.answer("🔥 <b>Хиты</b>\n\nЛистай карточки ◀️▶️ ниже 👇")
-    else:
-        await c.message.answer(
-            "🔥 <b>Хиты</b>\n\n"
-            "Пока не настроены — показываю 10 товаров. "
-            "Если включишь ADMIN_ID, сможешь добавлять хиты кнопкой ⭐."
-        )
-
-    await send_offer(c.message, hits[0], mode="hits", index=0, total=len(hits), user_id=c.from_user.id)
+    await c.message.answer("🔥 <b>Хиты</b>\n\nЛистай карточки ◀️▶️ ниже 👇")
+    await send_offer(c.message, hits[0], mode="hits", index=0, total=len(hits))
     await c.answer()
 
 @dp.callback_query(F.data == "shop_search")
@@ -451,15 +495,15 @@ async def shop_search_query(m: Message, state: FSMContext):
     try:
         offers = await get_offers()
     except Exception as e:
-        await m.answer(f"⚠️ Не удалось загрузить товары из Маркета.\n{e}")
+        await m.answer(f"⚠️ Не удалось загрузить товары.\n{e}")
         await state.clear()
         return
 
     q = query.lower()
-    found = [o for o in offers if q in o.name.lower() or q in o.offer_id.lower()]
+    found = [o for o in offers if q in o.name.lower()]
 
     if not found:
-        await m.answer("Ничего не найдено. Попробуйте другое слово.")
+        await m.answer("Ничего не найдено среди товаров в наличии. Попробуйте другое слово.")
         await state.clear()
         return
 
@@ -467,11 +511,10 @@ async def shop_search_query(m: Message, state: FSMContext):
     await state.clear()
 
     await m.answer(f"Найдено: <b>{len(found)}</b>. Листай карточки ◀️▶️ ниже 👇")
-    await send_offer(m, found[0], mode="search", index=0, total=len(found), user_id=m.from_user.id)
+    await send_offer(m, found[0], mode="search", index=0, total=len(found))
 
 @dp.callback_query(F.data.startswith("shop_show:"))
 async def shop_show(c: CallbackQuery):
-    # shop_show:{mode}:{index}
     parts = c.data.split(":")
     if len(parts) != 3:
         await c.answer()
@@ -497,40 +540,8 @@ async def shop_show(c: CallbackQuery):
         return
 
     index = max(0, min(index, len(offers) - 1))
-    await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers), user_id=c.from_user.id)
+    await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers))
     await c.answer()
-
-# ================== АДМИН: добавить в хиты ==================
-@dp.callback_query(F.data.startswith("hit_add:"))
-async def hit_add(c: CallbackQuery):
-    if ADMIN_ID == 0 or c.from_user.id != ADMIN_ID:
-        await c.answer("Недоступно", show_alert=True)
-        return
-
-    offer_id = c.data.split(":", 1)[1].strip()
-    if not offer_id:
-        await c.answer()
-        return
-
-    # сохраняем в hits.json рядом с bot.py (в Railway может сбрасываться при перезапуске)
-    # лучше потом перевести на БД/Redis, но для начала работает.
-    hits_path = os.path.join(BASE_DIR, "hits.json")
-    try:
-        if os.path.exists(hits_path):
-            with open(hits_path, "r", encoding="utf-8") as f:
-                hits = json.load(f)
-            if not isinstance(hits, list):
-                hits = []
-        else:
-            hits = []
-        if offer_id not in hits:
-            hits.append(offer_id)
-            with open(hits_path, "w", encoding="utf-8") as f:
-                json.dump(hits, f, ensure_ascii=False, indent=2)
-        await c.answer("Добавлено в хиты ✅", show_alert=True)
-    except Exception:
-        logging.exception("Failed to write hits.json")
-        await c.answer("Не удалось сохранить (Railway может очищать файлы). Лучше задать HIT_OFFER_IDS.", show_alert=True)
 
 # ================== РЕЦЕПТЫ ==================
 @dp.callback_query(F.data == "recipes")
@@ -629,7 +640,6 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    # важно для polling: убрать возможный webhook
     await bot.delete_webhook(drop_pending_updates=True)
 
     try:
@@ -641,6 +651,8 @@ async def main():
 
     if not MARKET_API_KEY or not MARKET_BUSINESS_ID:
         logging.warning("Market API env not set: MARKET_API_KEY / MARKET_BUSINESS_ID")
+    if not MARKET_CAMPAIGN_ID:
+        logging.warning("MARKET_CAMPAIGN_ID not set -> stock filter will be disabled")
 
     await dp.start_polling(
         bot,
