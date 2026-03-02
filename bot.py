@@ -5,6 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote_plus
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -35,11 +36,10 @@ PROMO_CODE = os.getenv("PROMO_CODE", "W39AMMMC")
 
 # Яндекс Маркет (Partner API)
 MARKET_API_KEY = os.getenv("MARKET_API_KEY")
-MARKET_BUSINESS_ID = os.getenv("MARKET_BUSINESS_ID")  # строка ок
+MARKET_BUSINESS_ID = os.getenv("MARKET_BUSINESS_ID")  # "176784099"
 API_BASE = "https://api.partner.market.yandex.ru"
 
-# Хиты (лучше задать руками через env)
-# пример: HIT_OFFER_IDS="ag-8l,steam-01,vac-3l"
+# Хиты (ручная настройка, самый стабильный вариант)
 HIT_OFFER_IDS = [x.strip() for x in (os.getenv("HIT_OFFER_IDS", "")).split(",") if x.strip()]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +48,6 @@ DB_PATH = os.path.join(BASE_DIR, "forward_map.json")
 WELCOME_IMG = "welcome.png"
 MAIN_MENU_IMG = "banner_main.png"
 
-# Кэш офферов (чтобы стабильно и быстро)
 OFFERS_CACHE_TTL_SEC = int(os.getenv("OFFERS_CACHE_TTL_SEC", "300"))  # 5 минут
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -106,8 +105,28 @@ def safe_https(url: Optional[str]) -> Optional[str]:
         return "https:" + url
     if url.startswith("http://") or url.startswith("https://"):
         return url
-    # иногда API может отдавать без схемы
     return "https://" + url.lstrip("/")
+
+def fallback_market_search_url(name: str) -> str:
+    return f"https://market.yandex.ru/search?text={quote_plus(name)}"
+
+# ================== КАТЕГОРИИ (быстро и надёжно) ==================
+def detect_category(name: str) -> str:
+    n = name.lower()
+    if "аэрогрил" in n:
+        return "aerogrill"
+    if "пылесос" in n:
+        return "vacuum"
+    if "пароочист" in n or "пароген" in n or "парошвабр" in n:
+        return "steam"
+    return "other"
+
+CAT_TITLES = {
+    "aerogrill": "🍗 Аэрогрили",
+    "vacuum": "🧹 Пылесосы",
+    "steam": "💨 Пароочистители",
+    "other": "📦 Другое",
+}
 
 # ================== КЛАВИАТУРЫ ==================
 def kb_main() -> InlineKeyboardMarkup:
@@ -128,33 +147,35 @@ def kb_back() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
     ])
 
-def kb_shop_menu() -> InlineKeyboardMarkup:
+def kb_shop_categories() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍗 Аэрогрили", callback_data="cat:aerogrill")],
+        [InlineKeyboardButton(text="🧹 Пылесосы", callback_data="cat:vacuum")],
+        [InlineKeyboardButton(text="💨 Пароочистители", callback_data="cat:steam")],
+        [InlineKeyboardButton(text="📦 Другое", callback_data="cat:other")],
         [InlineKeyboardButton(text="🔥 Хиты", callback_data="shop_hits")],
         [InlineKeyboardButton(text="🔎 Поиск товара", callback_data="shop_search")],
         [InlineKeyboardButton(text="🛍 Открыть магазин", url=SHOP_URL)],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
     ])
 
-def kb_offer_nav(mode: str, index: int, total: int, url: Optional[str]) -> InlineKeyboardMarkup:
-    # mode: "all" | "hits" | "search"
+def kb_offer_nav(mode: str, index: int, total: int, url: str) -> InlineKeyboardMarkup:
     prev_i = max(index - 1, 0)
     next_i = min(index + 1, max(total - 1, 0))
-    row1 = []
-    if total > 1 and index > 0:
-        row1.append(InlineKeyboardButton(text="◀️", callback_data=f"shop_show:{mode}:{prev_i}"))
-    row1.append(InlineKeyboardButton(text=f"{index+1}/{total}", callback_data="noop"))
-    if total > 1 and index < total - 1:
-        row1.append(InlineKeyboardButton(text="▶️", callback_data=f"shop_show:{mode}:{next_i}"))
 
-    rows = []
-    if url:
-        rows.append([InlineKeyboardButton(text="🛒 Открыть", url=url)])
-    if row1:
-        rows.append(row1)
-    rows.append([InlineKeyboardButton(text="⬅️ К меню товаров", callback_data="shop")])
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    nav_row = []
+    if total > 1 and index > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️", callback_data=f"shop_show:{mode}:{prev_i}"))
+    nav_row.append(InlineKeyboardButton(text=f"{index+1}/{total}", callback_data="noop"))
+    if total > 1 and index < total - 1:
+        nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"shop_show:{mode}:{next_i}"))
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Открыть", url=url)],
+        nav_row,
+        [InlineKeyboardButton(text="⬅️ К категориям", callback_data="shop")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
+    ])
 
 # ================== ЭКРАНЫ ==================
 async def show_welcome(m: Message):
@@ -177,7 +198,10 @@ async def show_main_menu(msg: Message):
     except Exception:
         await msg.answer("🏠 <b>Главное меню</b>\n\nВыберите раздел 👇", reply_markup=kb_main())
 
-# ================== ЯНДЕКС API: загрузка товаров ==================
+# ================== СЕССИИ ТОВАРОВ (для листания) ==================
+USER_SHOP_SESSION: dict[int, dict] = {}
+
+# ================== ЯНДЕКС API ==================
 _OFFERS_CACHE: Tuple[float, List[Offer]] = (0.0, [])
 
 async def market_request(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,32 +219,17 @@ async def market_request(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             return data
 
 def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
-    """
-    Стараемся быть устойчивыми к разным форматам ответа.
-    """
-    offer = item.get("offer") or item.get("mappedOffer") or item.get("marketSku") or {}
+    offer = item.get("offer") or item.get("mappedOffer") or {}
     if not isinstance(offer, dict):
         offer = {}
 
-    offer_id = (
-        item.get("offerId")
-        or offer.get("offerId")
-        or offer.get("id")
-        or offer.get("shopSku")
-        or ""
-    )
+    offer_id = item.get("offerId") or offer.get("offerId") or offer.get("shopSku") or offer.get("id") or ""
     offer_id = str(offer_id).strip()
     if not offer_id:
         return None
 
-    name = (
-        offer.get("name")
-        or offer.get("title")
-        or item.get("name")
-        or f"Товар {offer_id}"
-    )
+    name = offer.get("name") or item.get("name") or f"Товар {offer_id}"
 
-    # pictures может быть list[str] или list[dict]
     photo_url = None
     pics = offer.get("pictures") or offer.get("images") or []
     if isinstance(pics, list) and pics:
@@ -230,7 +239,6 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
         elif isinstance(p0, str):
             photo_url = p0
 
-    # urls может быть list[dict] с directUrl, либо строка
     url = None
     urls = offer.get("urls") or []
     if isinstance(urls, list) and urls:
@@ -240,8 +248,7 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
         elif isinstance(u0, str):
             url = u0
     if not url:
-        # иногда бывает в другом месте
-        url = offer.get("url") or item.get("url")
+        url = offer.get("url") or item.get("url")  # иногда так
 
     return Offer(
         offer_id=offer_id,
@@ -258,20 +265,13 @@ async def get_offers(force: bool = False) -> List[Offer]:
     if (not force) and cached and (now - ts) < OFFERS_CACHE_TTL_SEC:
         return cached
 
-    body = {"limit": 200}  # можно увеличить при необходимости
     data = await market_request(
         f"/v2/businesses/{MARKET_BUSINESS_ID}/offer-mappings",
-        body
+        {"limit": 200}
     )
 
-    # разные ключи у разных версий/ответов
     result = data.get("result", {})
-    raw_items = (
-        result.get("offerMappings")
-        or result.get("offerMappingEntries")
-        or result.get("offerMappingEntryList")
-        or []
-    )
+    raw_items = result.get("offerMappings") or result.get("offerMappingEntries") or []
 
     offers: List[Offer] = []
     if isinstance(raw_items, list):
@@ -281,7 +281,6 @@ async def get_offers(force: bool = False) -> List[Offer]:
                 if o:
                     offers.append(o)
 
-    # уберём дубликаты по offer_id
     uniq: Dict[str, Offer] = {}
     for o in offers:
         uniq[o.offer_id] = o
@@ -292,13 +291,24 @@ async def get_offers(force: bool = False) -> List[Offer]:
     _OFFERS_CACHE = (now, offers)
     return offers
 
+# ================== ТОВАР: отправка карточки ==================
+async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int):
+    url = offer.url or fallback_market_search_url(offer.name)
+    caption = f"<b>{offer.name}</b>\n\nID: <code>{offer.offer_id}</code>"
+    kb = kb_offer_nav(mode=mode, index=index, total=total, url=url)
+
+    if offer.photo_url:
+        await msg.answer_photo(photo=offer.photo_url, caption=caption, reply_markup=kb)
+    else:
+        await msg.answer(text=caption + f"\n\nСсылка: {url}", reply_markup=kb)
+
 # ================== START ==================
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
     await show_welcome(m)
 
-# ================== НАЗАД -> ГЛАВНОЕ МЕНЮ ==================
+# ================== НАВИГАЦИЯ ==================
 @dp.callback_query(F.data == "back")
 async def back(c: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -309,58 +319,48 @@ async def back(c: CallbackQuery, state: FSMContext):
 async def noop(c: CallbackQuery):
     await c.answer()
 
-# ================== НАШИ ТОВАРЫ (меню) ==================
+# ================== НАШИ ТОВАРЫ ==================
 @dp.callback_query(F.data == "shop")
 async def shop_menu(c: CallbackQuery, state: FSMContext):
     await state.clear()
     try:
         await c.message.answer_photo(
             photo=photo_file("banner_shop.png"),
-            caption="🛒 <b>Наши товары</b>\n\nВыберите действие 👇",
-            reply_markup=kb_shop_menu()
+            caption="🛒 <b>Наши товары</b>\n\nВыберите категорию или действие 👇",
+            reply_markup=kb_shop_categories()
         )
     except Exception:
-        await c.message.answer("🛒 <b>Наши товары</b>\n\nВыберите действие 👇", reply_markup=kb_shop_menu())
+        await c.message.answer("🛒 <b>Наши товары</b>\n\nВыберите категорию или действие 👇", reply_markup=kb_shop_categories())
     await c.answer()
 
-# ------------------ показать конкретный товар ------------------
-async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int):
-    caption = f"<b>{offer.name}</b>\n\nID: <code>{offer.offer_id}</code>"
-    kb = kb_offer_nav(mode=mode, index=index, total=total, url=offer.url)
-
-    if offer.photo_url:
-        await msg.answer_photo(photo=offer.photo_url, caption=caption, reply_markup=kb)
-    else:
-        await msg.answer(text=caption, reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("shop_show:"))
-async def shop_show(c: CallbackQuery, state: FSMContext):
-    # callback: shop_show:{mode}:{index}
-    parts = c.data.split(":")
-    if len(parts) != 3:
-        await c.answer()
-        return
-    mode = parts[1]
+@dp.callback_query(F.data.startswith("cat:"))
+async def shop_category(c: CallbackQuery):
+    cat = c.data.split(":", 1)[1]
     try:
-        index = int(parts[2])
-    except ValueError:
+        offers = await get_offers()
+    except Exception as e:
+        await c.message.answer(f"⚠️ Не удалось загрузить товары из Маркета.\n{e}")
         await c.answer()
         return
 
-    data = await state.get_data()
-    offers: List[Offer] = data.get("shop_offers", [])
-    if not offers:
-        await c.message.answer("Список товаров пуст. Откройте «Наши товары» заново.")
+    filtered = [o for o in offers if detect_category(o.name) == cat]
+    if not filtered:
+        await c.message.answer("В этой категории пока нет товаров.")
         await c.answer()
         return
 
-    index = max(0, min(index, len(offers) - 1))
-    await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers))
+    # подборка списком
+    title = CAT_TITLES.get(cat, "Категория")
+    lines = "\n".join([f"• {o.name}" for o in filtered[:10]])
+    await c.message.answer(f"<b>{title}</b>\n\n<b>Подборка:</b>\n{lines}\n\nОткрыл карточки для листания 👇")
+
+    mode = f"cat_{cat}"
+    USER_SHOP_SESSION[c.from_user.id] = {"mode": mode, "offers": filtered}
+    await send_offer(c.message, filtered[0], mode=mode, index=0, total=len(filtered))
     await c.answer()
 
-# ------------------ ХИТЫ ------------------
 @dp.callback_query(F.data == "shop_hits")
-async def shop_hits(c: CallbackQuery, state: FSMContext):
+async def shop_hits(c: CallbackQuery):
     try:
         offers = await get_offers()
     except Exception as e:
@@ -371,19 +371,19 @@ async def shop_hits(c: CallbackQuery, state: FSMContext):
     if HIT_OFFER_IDS:
         hits = [o for o in offers if o.offer_id in HIT_OFFER_IDS]
     else:
-        # если хиты не заданы — берём первые 10 по алфавиту (лучше задать вручную!)
+        # если не настроены хиты — покажем первые 10, чтобы ты увидел ID и настроил
         hits = offers[:10]
 
     if not hits:
-        await c.message.answer("🔥 Хиты пока не настроены. Добавьте HIT_OFFER_IDS в Railway Variables.")
+        await c.message.answer("🔥 Хиты пока пустые.")
         await c.answer()
         return
 
-    await state.update_data(shop_offers=hits)
+    USER_SHOP_SESSION[c.from_user.id] = {"mode": "hits", "offers": hits}
+    await c.message.answer("🔥 <b>Хиты</b>\n\nЛистай карточки ◀️▶️. Чтобы сделать хиты “как надо” — добавь HIT_OFFER_IDS в Railway.")
     await send_offer(c.message, hits[0], mode="hits", index=0, total=len(hits))
     await c.answer()
 
-# ------------------ ПОИСК ------------------
 @dp.callback_query(F.data == "shop_search")
 async def shop_search_start(c: CallbackQuery, state: FSMContext):
     await state.set_state(ShopSearchFlow.waiting_query)
@@ -408,13 +408,44 @@ async def shop_search_query(m: Message, state: FSMContext):
     found = [o for o in offers if q in o.name.lower() or q in o.offer_id.lower()]
 
     if not found:
-        await m.answer("Ничего не найдено. Попробуйте другое слово или откройте «Наши товары».")
+        await m.answer("Ничего не найдено. Попробуйте другое слово.")
         await state.clear()
         return
 
-    await state.update_data(shop_offers=found)
+    USER_SHOP_SESSION[m.from_user.id] = {"mode": "search", "offers": found}
     await state.clear()
     await send_offer(m, found[0], mode="search", index=0, total=len(found))
+
+@dp.callback_query(F.data.startswith("shop_show:"))
+async def shop_show(c: CallbackQuery):
+    # shop_show:{mode}:{index}
+    parts = c.data.split(":")
+    if len(parts) != 3:
+        await c.answer()
+        return
+
+    mode = parts[1]
+    try:
+        index = int(parts[2])
+    except ValueError:
+        await c.answer()
+        return
+
+    session = USER_SHOP_SESSION.get(c.from_user.id)
+    if not session or session.get("mode") != mode:
+        await c.message.answer("Список товаров устарел. Открой «Наши товары» заново.")
+        await c.answer()
+        return
+
+    offers = session.get("offers", [])
+    if not offers:
+        await c.message.answer("Список пуст. Открой «Наши товары» заново.")
+        await c.answer()
+        return
+
+    index = max(0, min(index, len(offers) - 1))
+    await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers))
+    await c.answer()
 
 # ================== РЕЦЕПТЫ ==================
 @dp.callback_query(F.data == "recipes")
@@ -513,10 +544,8 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    # важно для polling: убрать возможный webhook
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # проверка токена Telegram
     try:
         me = await bot.get_me()
         logging.info("Bot started as @%s (id=%s)", me.username, me.id)
@@ -524,7 +553,6 @@ async def main():
         logging.error("Invalid TOKEN. Check Railway Variables.")
         raise
 
-    # optional: проверим наличие market env (чтобы в логах было понятно)
     if not MARKET_API_KEY or not MARKET_BUSINESS_ID:
         logging.warning("Market API env not set: MARKET_API_KEY / MARKET_BUSINESS_ID")
 
