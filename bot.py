@@ -11,7 +11,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramUnauthorizedError
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -41,6 +41,9 @@ API_BASE = "https://api.partner.market.yandex.ru"
 
 # Хиты (ручная настройка, самый стабильный вариант)
 HIT_OFFER_IDS = [x.strip() for x in (os.getenv("HIT_OFFER_IDS", "")).split(",") if x.strip()]
+
+# Админ (опционально): только админ видит кнопку "Добавить в хиты"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # поставь свой tg id, чтобы включить админ-кнопку
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "forward_map.json")
@@ -107,18 +110,29 @@ def safe_https(url: Optional[str]) -> Optional[str]:
         return url
     return "https://" + url.lstrip("/")
 
-def fallback_market_search_url(name: str) -> str:
-    return f"https://market.yandex.ru/search?text={quote_plus(name)}"
+def store_search_url(query: str) -> str:
+    """
+    Поиск ВНУТРИ твоего магазина (по businessId), а не общий поиск Маркета.
+    """
+    bid = MARKET_BUSINESS_ID or "176784099"
+    return f"https://market.yandex.ru/search?text={quote_plus(query)}&businessId={bid}"
 
-# ================== КАТЕГОРИИ (быстро и надёжно) ==================
+# ================== КАТЕГОРИИ (расширено, чтобы не было пусто) ==================
 def detect_category(name: str) -> str:
     n = name.lower()
-    if "аэрогрил" in n:
+
+    if any(w in n for w in ["аэрогрил", "air fryer"]):
         return "aerogrill"
-    if "пылесос" in n:
+
+    if any(w in n for w in ["пылесос", "vacuum"]):
         return "vacuum"
-    if "пароочист" in n or "пароген" in n or "парошвабр" in n:
+
+    if any(w in n for w in [
+        "пароочист", "пароочиститель", "пароген", "паровая швабра", "парошвабр",
+        "steam", "steam mop", "steam cleaner", "отпаривател", "паровой"
+    ]):
         return "steam"
+
     return "other"
 
 CAT_TITLES = {
@@ -159,7 +173,7 @@ def kb_shop_categories() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
     ])
 
-def kb_offer_nav(mode: str, index: int, total: int, url: str) -> InlineKeyboardMarkup:
+def kb_offer_nav(mode: str, index: int, total: int, url: str, offer_id: str, is_admin: bool) -> InlineKeyboardMarkup:
     prev_i = max(index - 1, 0)
     next_i = min(index + 1, max(total - 1, 0))
 
@@ -170,12 +184,21 @@ def kb_offer_nav(mode: str, index: int, total: int, url: str) -> InlineKeyboardM
     if total > 1 and index < total - 1:
         nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"shop_show:{mode}:{next_i}"))
 
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text="🛒 Открыть", url=url)],
         nav_row,
+    ]
+
+    # Админская кнопка: добавить в хиты (покупателю не показываем)
+    if is_admin:
+        rows.append([InlineKeyboardButton(text="⭐ Добавить в хиты", callback_data=f"hit_add:{offer_id}")])
+
+    rows.extend([
         [InlineKeyboardButton(text="⬅️ К категориям", callback_data="shop")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
     ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ================== ЭКРАНЫ ==================
 async def show_welcome(m: Message):
@@ -219,6 +242,9 @@ async def market_request(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             return data
 
 def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
+    """
+    Парсер сделан "живучим", т.к. поля могут отличаться.
+    """
     offer = item.get("offer") or item.get("mappedOffer") or {}
     if not isinstance(offer, dict):
         offer = {}
@@ -248,7 +274,7 @@ def _parse_offer_item(item: Dict[str, Any]) -> Optional[Offer]:
         elif isinstance(u0, str):
             url = u0
     if not url:
-        url = offer.get("url") or item.get("url")  # иногда так
+        url = offer.get("url") or item.get("url")
 
     return Offer(
         offer_id=offer_id,
@@ -292,15 +318,29 @@ async def get_offers(force: bool = False) -> List[Offer]:
     return offers
 
 # ================== ТОВАР: отправка карточки ==================
-async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int):
-    url = offer.url or fallback_market_search_url(offer.name)
-    caption = f"<b>{offer.name}</b>\n\nID: <code>{offer.offer_id}</code>"
-    kb = kb_offer_nav(mode=mode, index=index, total=total, url=url)
+async def send_offer(msg: Message, offer: Offer, mode: str, index: int, total: int, user_id: int):
+    # ссылка либо из API, либо поиск ВНУТРИ магазина
+    url = offer.url or store_search_url(offer.name)
+
+    # ID не показываем покупателю
+    caption = f"<b>{offer.name}</b>"
+
+    is_admin = (ADMIN_ID != 0 and user_id == ADMIN_ID)
+    kb = kb_offer_nav(mode=mode, index=index, total=total, url=url, offer_id=offer.offer_id, is_admin=is_admin)
 
     if offer.photo_url:
         await msg.answer_photo(photo=offer.photo_url, caption=caption, reply_markup=kb)
     else:
-        await msg.answer(text=caption + f"\n\nСсылка: {url}", reply_markup=kb)
+        await msg.answer(text=caption, reply_markup=kb)
+
+# ================== СЛУЖЕБНОЕ ==================
+@dp.callback_query(F.data == "noop")
+async def noop(c: CallbackQuery):
+    await c.answer()
+
+@dp.message(Command("getid"))
+async def getid(m: Message):
+    await m.answer(f"Ваш id: <code>{m.from_user.id}</code>")
 
 # ================== START ==================
 @dp.message(CommandStart())
@@ -313,10 +353,6 @@ async def start(m: Message, state: FSMContext):
 async def back(c: CallbackQuery, state: FSMContext):
     await state.clear()
     await show_main_menu(c.message)
-    await c.answer()
-
-@dp.callback_query(F.data == "noop")
-async def noop(c: CallbackQuery):
     await c.answer()
 
 # ================== НАШИ ТОВАРЫ ==================
@@ -345,18 +381,25 @@ async def shop_category(c: CallbackQuery):
 
     filtered = [o for o in offers if detect_category(o.name) == cat]
     if not filtered:
-        await c.message.answer("В этой категории пока нет товаров.")
+        await c.message.answer("В этой категории пока нет товаров. Попробуйте «Другое» или поиск.")
         await c.answer()
         return
 
-    # подборка списком
     title = CAT_TITLES.get(cat, "Категория")
-    lines = "\n".join([f"• {o.name}" for o in filtered[:10]])
-    await c.message.answer(f"<b>{title}</b>\n\n<b>Подборка:</b>\n{lines}\n\nОткрыл карточки для листания 👇")
+
+    top = filtered[:10]
+    lines = "\n".join([f"{i+1}. {o.name}" for i, o in enumerate(top)])
+
+    await c.message.answer(
+        f"<b>{title}</b>\n\n<b>Подборка:</b>\n{lines}\n\n"
+        f"Найдено: <b>{len(filtered)}</b>\n"
+        "Листай карточки ◀️▶️ ниже 👇"
+    )
 
     mode = f"cat_{cat}"
     USER_SHOP_SESSION[c.from_user.id] = {"mode": mode, "offers": filtered}
-    await send_offer(c.message, filtered[0], mode=mode, index=0, total=len(filtered))
+
+    await send_offer(c.message, filtered[0], mode=mode, index=0, total=len(filtered), user_id=c.from_user.id)
     await c.answer()
 
 @dp.callback_query(F.data == "shop_hits")
@@ -371,7 +414,6 @@ async def shop_hits(c: CallbackQuery):
     if HIT_OFFER_IDS:
         hits = [o for o in offers if o.offer_id in HIT_OFFER_IDS]
     else:
-        # если не настроены хиты — покажем первые 10, чтобы ты увидел ID и настроил
         hits = offers[:10]
 
     if not hits:
@@ -380,8 +422,17 @@ async def shop_hits(c: CallbackQuery):
         return
 
     USER_SHOP_SESSION[c.from_user.id] = {"mode": "hits", "offers": hits}
-    await c.message.answer("🔥 <b>Хиты</b>\n\nЛистай карточки ◀️▶️. Чтобы сделать хиты “как надо” — добавь HIT_OFFER_IDS в Railway.")
-    await send_offer(c.message, hits[0], mode="hits", index=0, total=len(hits))
+
+    if HIT_OFFER_IDS:
+        await c.message.answer("🔥 <b>Хиты</b>\n\nЛистай карточки ◀️▶️ ниже 👇")
+    else:
+        await c.message.answer(
+            "🔥 <b>Хиты</b>\n\n"
+            "Пока не настроены — показываю 10 товаров. "
+            "Если включишь ADMIN_ID, сможешь добавлять хиты кнопкой ⭐."
+        )
+
+    await send_offer(c.message, hits[0], mode="hits", index=0, total=len(hits), user_id=c.from_user.id)
     await c.answer()
 
 @dp.callback_query(F.data == "shop_search")
@@ -414,7 +465,9 @@ async def shop_search_query(m: Message, state: FSMContext):
 
     USER_SHOP_SESSION[m.from_user.id] = {"mode": "search", "offers": found}
     await state.clear()
-    await send_offer(m, found[0], mode="search", index=0, total=len(found))
+
+    await m.answer(f"Найдено: <b>{len(found)}</b>. Листай карточки ◀️▶️ ниже 👇")
+    await send_offer(m, found[0], mode="search", index=0, total=len(found), user_id=m.from_user.id)
 
 @dp.callback_query(F.data.startswith("shop_show:"))
 async def shop_show(c: CallbackQuery):
@@ -444,8 +497,40 @@ async def shop_show(c: CallbackQuery):
         return
 
     index = max(0, min(index, len(offers) - 1))
-    await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers))
+    await send_offer(c.message, offers[index], mode=mode, index=index, total=len(offers), user_id=c.from_user.id)
     await c.answer()
+
+# ================== АДМИН: добавить в хиты ==================
+@dp.callback_query(F.data.startswith("hit_add:"))
+async def hit_add(c: CallbackQuery):
+    if ADMIN_ID == 0 or c.from_user.id != ADMIN_ID:
+        await c.answer("Недоступно", show_alert=True)
+        return
+
+    offer_id = c.data.split(":", 1)[1].strip()
+    if not offer_id:
+        await c.answer()
+        return
+
+    # сохраняем в hits.json рядом с bot.py (в Railway может сбрасываться при перезапуске)
+    # лучше потом перевести на БД/Redis, но для начала работает.
+    hits_path = os.path.join(BASE_DIR, "hits.json")
+    try:
+        if os.path.exists(hits_path):
+            with open(hits_path, "r", encoding="utf-8") as f:
+                hits = json.load(f)
+            if not isinstance(hits, list):
+                hits = []
+        else:
+            hits = []
+        if offer_id not in hits:
+            hits.append(offer_id)
+            with open(hits_path, "w", encoding="utf-8") as f:
+                json.dump(hits, f, ensure_ascii=False, indent=2)
+        await c.answer("Добавлено в хиты ✅", show_alert=True)
+    except Exception:
+        logging.exception("Failed to write hits.json")
+        await c.answer("Не удалось сохранить (Railway может очищать файлы). Лучше задать HIT_OFFER_IDS.", show_alert=True)
 
 # ================== РЕЦЕПТЫ ==================
 @dp.callback_query(F.data == "recipes")
@@ -544,6 +629,7 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
+    # важно для polling: убрать возможный webhook
     await bot.delete_webhook(drop_pending_updates=True)
 
     try:
