@@ -2,14 +2,12 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -17,6 +15,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = os.getenv("TOKEN")  # Railway Variables
@@ -30,13 +30,16 @@ PROMO_CODE = os.getenv("PROMO_CODE", "W39AMMMC")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "forward_map.json")
 
+WELCOME_IMG = "welcome.png"          # приветствие (/start)
+MAIN_MENU_IMG = "banner_main.png"    # главное меню (по кнопке Назад)
+
 if not TOKEN:
     raise RuntimeError("TOKEN not found in Railway Variables")
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# ================== БАЗА ==================
+# ================== БАЗА (reply map) ==================
 def load_db() -> Dict[str, int]:
     if not os.path.exists(DB_PATH):
         return {}
@@ -45,10 +48,9 @@ def load_db() -> Dict[str, int]:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
-        # гарантируем str->int
         return {str(k): int(v) for k, v in data.items()}
     except Exception:
-        logging.exception("Failed to read %s, starting with empty DB", DB_PATH)
+        logging.exception("Failed to read %s, starting empty", DB_PATH)
         return {}
 
 def save_db(db: Dict[str, int]) -> None:
@@ -58,13 +60,18 @@ def save_db(db: Dict[str, int]) -> None:
             json.dump(db, f, ensure_ascii=False)
         os.replace(tmp, DB_PATH)
     except Exception:
-        logging.exception("Failed to write %s (Railway FS may be ephemeral)", DB_PATH)
+        logging.exception("Failed to write %s", DB_PATH)
 
-FORWARD_MAP: Dict[str, int] = load_db()
+FORWARD_MAP = load_db()
 
 # ================== FSM ==================
 class SupportFlow(StatesGroup):
     waiting_message = State()
+
+# ================== УТИЛИТЫ ==================
+def photo_file(filename: str) -> FSInputFile:
+    path = os.path.join(BASE_DIR, filename)
+    return FSInputFile(path)
 
 # ================== КНОПКИ ==================
 def kb_main() -> InlineKeyboardMarkup:
@@ -77,104 +84,90 @@ def kb_main() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎁 Промокод -5%", callback_data="promo"),
             InlineKeyboardButton(text="📘 Памятка", callback_data="memo"),
         ],
-        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
+        [
+            InlineKeyboardButton(text="🆘 Поддержка", callback_data="support"),
+        ],
     ])
-
-def photo_file(filename: str) -> FSInputFile:
-    path = os.path.join(BASE_DIR, filename)
-    if not os.path.exists(path):
-        # чтобы не падать “непонятно почему”
-        raise FileNotFoundError(f"File not found: {path}")
-    return FSInputFile(path)
 
 def kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
     ])
 
-# ================== START ==================
-@dp.message(CommandStart())
-async def start(m: Message, state: FSMContext):
-    await state.clear()
+# ================== ВЫВОД ЭКРАНОВ ==================
+async def show_welcome(m: Message):
+    """Приветствие /start"""
     try:
         await m.answer_photo(
-            photo=photo_file("welcome.png"),
+            photo=photo_file(WELCOME_IMG),
             caption="🤖 <b>Техно Олимп Бот</b>\n\nВыберите раздел ниже 👇",
             reply_markup=kb_main()
         )
-    except FileNotFoundError:
-        # если вдруг картинка не задеплоилась — бот хотя бы отвечает
+    except Exception:
+        # если вдруг картинка не найдется — бот всё равно отвечает
         await m.answer(
             "🤖 <b>Техно Олимп Бот</b>\n\nВыберите раздел ниже 👇",
             reply_markup=kb_main()
         )
 
+async def show_main_menu(msg: Message):
+    """Главное меню (banner_main.png)"""
+    try:
+        await msg.answer_photo(
+            photo=photo_file(MAIN_MENU_IMG),
+            caption="🏠 <b>Главное меню</b>\n\nВыберите раздел 👇",
+            reply_markup=kb_main()
+        )
+    except Exception:
+        await msg.answer(
+            "🏠 <b>Главное меню</b>\n\nВыберите раздел 👇",
+            reply_markup=kb_main()
+        )
+
+# ================== START ==================
+@dp.message(CommandStart())
+async def start(m: Message, state: FSMContext):
+    await state.clear()
+    await show_welcome(m)
+
 # ================== НАШИ ТОВАРЫ ==================
 @dp.callback_query(F.data == "shop")
 async def shop(c: CallbackQuery):
-    try:
-        await c.message.answer_photo(
-            photo=photo_file("banner_shop.png"),
-            caption="🛒 <b>Техника для дома и кухни</b>\n\nПерейдите в магазин 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🛍 Открыть магазин", url=SHOP_URL)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
-    except FileNotFoundError:
-        await c.message.answer(
-            "🛒 <b>Техника для дома и кухни</b>\n\nПерейдите в магазин 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🛍 Открыть магазин", url=SHOP_URL)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
+    await c.message.answer_photo(
+        photo=photo_file("banner_shop.png"),
+        caption="🛒 <b>Техника для дома и кухни</b>\n\nПерейдите в магазин 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛍 Открыть магазин", url=SHOP_URL)],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+        ])
+    )
     await c.answer()
 
 # ================== РЕЦЕПТЫ ==================
 @dp.callback_query(F.data == "recipes")
 async def recipes(c: CallbackQuery):
-    try:
-        await c.message.answer_photo(
-            photo=photo_file("banner_recipes.png"),
-            caption="🍗 <b>Книга рецептов для аэрогриля</b>\n\nПодписывайтесь 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📲 Открыть канал", url=CHANNEL_URL)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
-    except FileNotFoundError:
-        await c.message.answer(
-            "🍗 <b>Книга рецептов для аэрогриля</b>\n\nПодписывайтесь 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📲 Открыть канал", url=CHANNEL_URL)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
+    await c.message.answer_photo(
+        photo=photo_file("banner_recipes.png"),
+        caption="🍗 <b>Книга рецептов для аэрогриля</b>\n\nПодписывайтесь 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📲 Открыть канал", url=CHANNEL_URL)],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+        ])
+    )
     await c.answer()
 
 # ================== ПРОМО ==================
 @dp.callback_query(F.data == "promo")
 async def promo(c: CallbackQuery):
-    try:
-        await c.message.answer_photo(
-            photo=photo_file("banner_promo.png"),
-            caption="🎁 <b>Получите скидку -5%</b>\n\nПодпишитесь и нажмите «Я подписался» 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📲 Подписаться", url=CHANNEL_URL)],
-                [InlineKeyboardButton(text="✅ Я подписался", callback_data="promo_check")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
-    except FileNotFoundError:
-        await c.message.answer(
-            "🎁 <b>Получите скидку -5%</b>\n\nПодпишитесь и нажмите «Я подписался» 👇",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📲 Подписаться", url=CHANNEL_URL)],
-                [InlineKeyboardButton(text="✅ Я подписался", callback_data="promo_check")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
+    await c.message.answer_photo(
+        photo=photo_file("banner_promo.png"),
+        caption="🎁 <b>Получите скидку -5%</b>\n\nПодпишитесь и нажмите «Я подписался» 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📲 Подписаться", url=CHANNEL_URL)],
+            [InlineKeyboardButton(text="✅ Я подписался", callback_data="promo_check")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+        ])
+    )
     await c.answer()
 
 @dp.callback_query(F.data == "promo_check")
@@ -186,11 +179,9 @@ async def promo_check(c: CallbackQuery):
             await c.answer()
             return
     except Exception:
-        # На практике это самый частый источник "крашей" при проверке канала
         await c.message.answer(
             "⚠️ Не удалось проверить подписку.\n\n"
-            "Проверьте, что бот имеет доступ к каналу (часто нужно добавить бота администратором),\n"
-            "и попробуйте ещё раз."
+            "Проверьте, что бот добавлен в канал (часто нужно дать права админа), и попробуйте ещё раз."
         )
         await c.answer()
         return
@@ -205,48 +196,29 @@ async def promo_check(c: CallbackQuery):
 # ================== ПАМЯТКА ==================
 @dp.callback_query(F.data == "memo")
 async def memo(c: CallbackQuery):
-    try:
-        await c.message.answer_photo(
-            photo=photo_file("banner_memo.png"),
-            caption="📘 <b>Памятка по аэрогрилю</b>\n\n"
-                    "• Не заполняйте чашу более 70%\n"
-                    "• Прогрейте перед первым использованием\n"
-                    "• Переворачивайте продукты\n",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
-    except FileNotFoundError:
-        await c.message.answer(
-            "📘 <b>Памятка по аэрогрилю</b>\n\n"
-            "• Не заполняйте чашу более 70%\n"
-            "• Прогрейте перед первым использованием\n"
-            "• Переворачивайте продукты\n",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
-            ])
-        )
+    await c.message.answer_photo(
+        photo=photo_file("banner_memo.png"),
+        caption="📘 <b>Памятка по аэрогрилю</b>\n\n"
+                "• Не заполняйте чашу более 70%\n"
+                "• Прогрейте перед первым использованием\n"
+                "• Переворачивайте продукты\n",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back")]
+        ])
+    )
     await c.answer()
 
 # ================== ПОДДЕРЖКА ==================
 @dp.callback_query(F.data == "support")
 async def support(c: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.waiting_message)
-    try:
-        await c.message.answer_photo(
-            photo=photo_file("banner_support.png"),
-            caption="✍️ Напишите сообщение в поддержку.\n\n"
-                    "Укажите номер заказа и описание проблемы.",
-            reply_markup=kb_back()
-        )
-    except FileNotFoundError:
-        await c.message.answer(
-            "✍️ Напишите сообщение в поддержку.\n\n"
-            "Укажите номер заказа и описание проблемы.",
-            reply_markup=kb_back()
-        )
+    await c.message.answer_photo(
+        photo=photo_file("banner_support.png"),
+        caption="✍️ Напишите сообщение в поддержку.\n\n"
+                "Укажите номер заказа и описание проблемы.",
+        reply_markup=kb_back()
+    )
     await c.answer()
 
 @dp.message(SupportFlow.waiting_message)
@@ -262,11 +234,11 @@ async def support_message(m: Message, state: FSMContext):
     await m.answer("✅ Сообщение отправлено в поддержку.")
     await state.clear()
 
-# ================== НАЗАД ==================
+# ================== НАЗАД (ГЛАВНОЕ МЕНЮ С КАРТИНКОЙ) ==================
 @dp.callback_query(F.data == "back")
 async def back(c: CallbackQuery, state: FSMContext):
-    await state.clear()  # ВАЖНО: иначе FSM "поддержки" остаётся активной
-    await c.message.answer("Главное меню:", reply_markup=kb_main())
+    await state.clear()
+    await show_main_menu(c.message)
     await c.answer()
 
 # ================== RUN ==================
@@ -276,10 +248,10 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    # ВАЖНО для Railway: убрать возможный webhook
+    # важно для polling на Railway
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # Быстрая проверка токена (чтобы в логах было очевидно)
+    # проверка токена
     try:
         me = await bot.get_me()
         logging.info("Bot started as @%s (id=%s)", me.username, me.id)
