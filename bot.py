@@ -343,14 +343,12 @@ def _is_offer_in_stock(offer_item: Dict[str, Any]) -> bool:
 
     if any(w in cand_str for w in ["out", "нет", "no", "disabled", "archive", "off", "zero"]):
         return False
-
     if any(w in cand_str for w in ["ok", "active", "published", "ready", "in_stock", "instock", "available", "on"]):
         return True
-
     if params.get("published") is True or params.get("hasStock") is True:
         return True
 
-    # по умолчанию — считаем что в наличии, чтобы не «потерять» товары из-за нестабильных полей
+    # ВАЖНО: чтобы не получить "пустой магазин" из-за отличающихся статусов
     return True
 
 async def get_instock_offer_ids(offer_ids: List[str]) -> set[str]:
@@ -477,7 +475,6 @@ async def sale(c: CallbackQuery, state: FSMContext):
 async def sale_check(c: CallbackQuery):
     user_id = str(c.from_user.id)
 
-    # уже выдавали
     if SALE_BONUS_USERS.get(user_id):
         await c.message.answer(
             "✅ Бонус -10% уже был выдан ранее.\n\nКанал с акциями 👇",
@@ -489,7 +486,6 @@ async def sale_check(c: CallbackQuery):
         await c.answer()
         return
 
-    # проверяем подписку (бот должен быть админом канала)
     try:
         member = await bot.get_chat_member(SALE_CHANNEL_USERNAME, c.from_user.id)
         if member.status not in ("member", "administrator", "creator"):
@@ -515,11 +511,9 @@ async def sale_check(c: CallbackQuery):
         await c.answer()
         return
 
-    # фиксируем выдачу один раз
     SALE_BONUS_USERS[user_id] = True
     save_sale_db(SALE_BONUS_USERS)
 
-    # отправляем картинку промокода + текст
     try:
         await c.message.answer_photo(
             photo=photo_file(BANNER_SALE_PROMO),
@@ -742,11 +736,10 @@ async def promo_check(c: CallbackQuery):
     )
     await c.answer()
 
-# ================== ПАМЯТКА (ПОЛНАЯ) ==================
+# ================== ПАМЯТКА (СТАБИЛЬНАЯ: НЕ ЛОМАЕТСЯ, ДАЖЕ ЕСЛИ НЕТ ФАЙЛА) ==================
 @dp.callback_query(F.data == "memo")
 async def memo(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    photo = photo_file(BANNER_MEMO)
 
     text = (
         "📘 <b>ПАМЯТКА ПО ИСПОЛЬЗОВАНИЮ АЭРОГРИЛЯ</b>\n"
@@ -785,14 +778,21 @@ async def memo(c: CallbackQuery, state: FSMContext):
         "Есть автоматические программы или ручной режим — можно задать температуру и время самостоятельно."
     )
 
-    await c.message.answer_photo(
-        photo=photo,
-        caption=text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
-        ])
-    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
+    ])
+
+    try:
+        await c.message.answer_photo(
+            photo=photo_file(BANNER_MEMO),  # banner_memo.png
+            caption=text,
+            reply_markup=kb
+        )
+    except Exception as e:
+        # если баннер отсутствует/не читается — отправляем текстом, но кнопка работает
+        await c.message.answer(text, reply_markup=kb)
+
     await c.answer()
 
 # ================== ПОДДЕРЖКА (НОВЫЙ ТЕКСТ + ОТВЕТЫ НАЗАД) ==================
@@ -820,14 +820,12 @@ async def support_message(m: Message, state: FSMContext):
     header = f"📩 Обращение от {m.from_user.full_name} | id:{m.from_user.id}"
     header_msg = await bot.send_message(SUPPORT_CHAT_ID, header)
 
-    # copy_message — стабильнее для медиа, чем forward_message
     copied = await bot.copy_message(
         chat_id=SUPPORT_CHAT_ID,
         from_chat_id=m.chat.id,
         message_id=m.message_id
     )
 
-    # привязка: если оператор ответит реплаем на header или на copied — бот поймет кому отвечать
     FORWARD_MAP[str(header_msg.message_id)] = m.from_user.id
     FORWARD_MAP[str(copied.message_id)] = m.from_user.id
     save_db(FORWARD_MAP)
@@ -835,7 +833,6 @@ async def support_message(m: Message, state: FSMContext):
     await m.answer("✅ Сообщение отправлено в поддержку. Мы ответим сюда же.", reply_markup=kb_back_to_menu())
     await state.clear()
 
-# Операторы отвечают пользователю реплаем в SUPPORT_CHAT_ID
 @dp.message(F.chat.id == SUPPORT_CHAT_ID, F.reply_to_message)
 async def support_reply_to_user(m: Message):
     replied_id = str(m.reply_to_message.message_id)
@@ -850,7 +847,6 @@ async def support_reply_to_user(m: Message):
             message_id=m.message_id
         )
     except Exception:
-        # пользователь мог заблокировать бота или закрыть ЛС
         return
 
 # ================== RUN ==================
@@ -860,7 +856,6 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    # На Railway используем polling — webhook чистим
     await bot.delete_webhook(drop_pending_updates=True)
 
     try:
