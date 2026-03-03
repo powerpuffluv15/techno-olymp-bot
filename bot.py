@@ -47,7 +47,7 @@ PROMO_CODE = os.getenv("PROMO_CODE", "W39AMMMC")
 SALE_CHANNEL_USERNAME = os.getenv("SALE_CHANNEL_USERNAME", "@techno_Olymp_sale")
 SALE_CHANNEL_URL = os.getenv("SALE_CHANNEL_URL", "https://t.me/techno_Olymp_sale")
 
-# Промокод -10% (за акционный канал) — как вы просили
+# Промокод -10% (за акционный канал)
 SALE_BONUS_PROMO = os.getenv("SALE_BONUS_PROMO", "ОЛИМП10")
 
 # Яндекс Маркет (Partner API)
@@ -58,7 +58,7 @@ API_BASE = "https://api.partner.market.yandex.ru"
 
 OFFERS_CACHE_TTL_SEC = int(os.getenv("OFFERS_CACHE_TTL_SEC", "300"))  # 5 минут
 
-# Хиты — ссылки на карточки (передавать через Railway Variable HIT_CARD_URLS, по одной ссылке на строку)
+# Хиты — ссылки на карточки (Railway Variable HIT_CARD_URLS, по одной ссылке на строку)
 _raw_hit_urls = os.getenv("HIT_CARD_URLS", "")
 HIT_CARD_URLS: List[str] = []
 if _raw_hit_urls.strip():
@@ -167,14 +167,13 @@ def safe_https(url: Optional[str]) -> Optional[str]:
     return "https://" + url.lstrip("/")
 
 def store_search_url(query: str) -> str:
-    """Поиск ВНУТРИ магазина по businessId."""
+    """Поиск внутри магазина по businessId."""
     bid = MARKET_BUSINESS_ID or "176784099"
     return f"https://market.yandex.ru/search?text={quote_plus(query)}&businessId={bid}"
 
 # ================== CATEGORY DETECT ==================
 def detect_category(name: str) -> str:
     n = name.lower()
-
     if any(w in n for w in ["аэрогрил", "air fryer"]):
         return "aerogrill"
     if any(w in n for w in ["пылесос", "vacuum"]):
@@ -195,27 +194,19 @@ CAT_TITLES = {
 
 # ================== KEYBOARDS ==================
 def kb_main() -> InlineKeyboardMarkup:
-    """
-    Требование:
-    - Книга рецептов = 3-я по счёту и выделена (широкая кнопка)
-    - Поддержка = 5-я по счёту и выделена (широкая кнопка)
-    """
+    # Книга рецептов (3-я и выделенная), Поддержка (5-я и выделенная)
     return InlineKeyboardMarkup(inline_keyboard=[
-        # 1 и 2
         [
-            InlineKeyboardButton(text="🛒 Наши товары", callback_data="shop"),
-            InlineKeyboardButton(text="⚡ Акционный товар", callback_data="sale"),
+            InlineKeyboardButton(text="🛒 Товары", callback_data="shop"),
+            InlineKeyboardButton(text="⚡ Акции", callback_data="sale"),
         ],
-        # 3 (выделенная)
         [
             InlineKeyboardButton(text="🍗 КНИГА РЕЦЕПТОВ", callback_data="recipes"),
         ],
-        # 4 и 6
         [
             InlineKeyboardButton(text="🎁 Промокод -5%", callback_data="promo"),
             InlineKeyboardButton(text="📘 Памятка", callback_data="memo"),
         ],
-        # 5 (выделенная)
         [
             InlineKeyboardButton(text="💬 ПОДДЕРЖКА", callback_data="support"),
         ],
@@ -359,7 +350,8 @@ def _is_offer_in_stock(offer_item: Dict[str, Any]) -> bool:
     if params.get("published") is True or params.get("hasStock") is True:
         return True
 
-    return False
+    # по умолчанию — считаем что в наличии, чтобы не «потерять» товары из-за нестабильных полей
+    return True
 
 async def get_instock_offer_ids(offer_ids: List[str]) -> set[str]:
     if not MARKET_CAMPAIGN_ID:
@@ -488,8 +480,7 @@ async def sale_check(c: CallbackQuery):
     # уже выдавали
     if SALE_BONUS_USERS.get(user_id):
         await c.message.answer(
-            "✅ Бонус -10% уже был выдан ранее.\n\n"
-            "Канал с акциями 👇",
+            "✅ Бонус -10% уже был выдан ранее.\n\nКанал с акциями 👇",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📲 Канал с акциями", url=SALE_CHANNEL_URL)],
                 [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")],
@@ -503,8 +494,7 @@ async def sale_check(c: CallbackQuery):
         member = await bot.get_chat_member(SALE_CHANNEL_USERNAME, c.from_user.id)
         if member.status not in ("member", "administrator", "creator"):
             await c.message.answer(
-                "❌ Подписка не найдена.\n\n"
-                "Подпишитесь на канал и нажмите кнопку ещё раз 👇",
+                "❌ Подписка не найдена.\n\nПодпишитесь на канал и нажмите кнопку ещё раз 👇",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📲 Открыть канал с акциями", url=SALE_CHANNEL_URL)],
                     [InlineKeyboardButton(text="✅ Я подписался", callback_data="sale_check")],
@@ -529,7 +519,7 @@ async def sale_check(c: CallbackQuery):
     SALE_BONUS_USERS[user_id] = True
     save_sale_db(SALE_BONUS_USERS)
 
-    # ✅ отправляем картинку промокода + текст (как вы просили)
+    # отправляем картинку промокода + текст
     try:
         await c.message.answer_photo(
             photo=photo_file(BANNER_SALE_PROMO),
@@ -752,30 +742,73 @@ async def promo_check(c: CallbackQuery):
     )
     await c.answer()
 
-# ================== ПАМЯТКА ==================
+# ================== ПАМЯТКА (ПОЛНАЯ) ==================
 @dp.callback_query(F.data == "memo")
 async def memo(c: CallbackQuery, state: FSMContext):
     await state.clear()
+    photo = photo_file(BANNER_MEMO)
+
+    text = (
+        "📘 <b>ПАМЯТКА ПО ИСПОЛЬЗОВАНИЮ АЭРОГРИЛЯ</b>\n"
+        "<b>и ответы на частые вопросы</b>\n\n"
+
+        "<b>Запах пластика при первом использовании</b>\n"
+        "Это нормальное явление и не говорит о неисправности. "
+        "Запах со временем исчезает и не влияет на вкус блюд.\n\n"
+
+        "<b>Причины</b>\n"
+        "При производстве используются пластмассовые и металлические элементы, "
+        "на которых могут оставаться следы заводских смазок или защитных покрытий. "
+        "При первом нагревании остатки испаряются — появляется запах.\n\n"
+
+        "<b>Методы устранения</b>\n"
+        "1) <b>Подготовить устройство</b>:\n"
+        "• Вымойте съёмные элементы (корзину, решётки, поддоны) тёплой водой с мягким средством.\n"
+        "• Протрите внутренние поверхности влажной тканью и дайте полностью высохнуть.\n\n"
+        "2) <b>Прогреть вхолостую</b>:\n"
+        "• 200–220°C на 15–20 минут без продуктов.\n"
+        "• Проветрите помещение.\n\n"
+        "3) <b>Натуральные средства</b>:\n"
+        "• <b>Уксус</b>: вода + 1–2 ст. л. уксуса, 150–170°C ~ 15 минут.\n"
+        "• <b>Лимон</b>: дольки лимона в воду, прогреть 10–15 минут.\n\n"
+
+        "Если запах не исчезает после нескольких циклов — возможен заводской брак. "
+        "В таком случае лучше обратиться в сервис.\n\n"
+
+        "<b>Правила эксплуатации</b>\n"
+        "• Не заполняйте чашу более чем на 70% — воздух должен циркулировать.\n"
+        "• Используйте решётку для равномерного приготовления.\n"
+        "• Переворачивайте/перемешивайте плотные продукты при долгой готовке.\n"
+        "• Проверяйте готовность до выключения (снаружи может быть готово, внутри — нет).\n\n"
+
+        "<b>Режимы</b>\n"
+        "Есть автоматические программы или ручной режим — можно задать температуру и время самостоятельно."
+    )
+
     await c.message.answer_photo(
-        photo=photo_file(BANNER_MEMO),
-        caption="📘 <b>Памятка по аэрогрилю</b>\n\n"
-                "• Не заполняйте чашу более 70%\n"
-                "• Прогрейте перед первым использованием\n"
-                "• Переворачивайте продукты\n",
+        photo=photo,
+        caption=text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
+            [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
         ])
     )
     await c.answer()
 
-# ================== ПОДДЕРЖКА ==================
+# ================== ПОДДЕРЖКА (НОВЫЙ ТЕКСТ + ОТВЕТЫ НАЗАД) ==================
 @dp.callback_query(F.data == "support")
 async def support(c: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.waiting_message)
     await c.message.answer_photo(
         photo=photo_file(BANNER_SUPPORT),
-        caption="✍️ Напишите сообщение в поддержку.\n\nУкажите номер заказа и описание проблемы.",
+        caption=(
+            "✍️ <b>Обращение в поддержку</b>\n\n"
+            "Для обращения укажите:\n"
+            "• номер заказа\n"
+            "• описание проблемы/вопроса\n"
+            "• фото/видео\n\n"
+            "⏳ <b>Примерное время ответа:</b> ~ 5 часов"
+        ),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back")]
         ])
@@ -786,14 +819,39 @@ async def support(c: CallbackQuery, state: FSMContext):
 async def support_message(m: Message, state: FSMContext):
     header = f"📩 Обращение от {m.from_user.full_name} | id:{m.from_user.id}"
     header_msg = await bot.send_message(SUPPORT_CHAT_ID, header)
-    forwarded = await bot.forward_message(SUPPORT_CHAT_ID, m.chat.id, m.message_id)
 
+    # copy_message — стабильнее для медиа, чем forward_message
+    copied = await bot.copy_message(
+        chat_id=SUPPORT_CHAT_ID,
+        from_chat_id=m.chat.id,
+        message_id=m.message_id
+    )
+
+    # привязка: если оператор ответит реплаем на header или на copied — бот поймет кому отвечать
     FORWARD_MAP[str(header_msg.message_id)] = m.from_user.id
-    FORWARD_MAP[str(forwarded.message_id)] = m.from_user.id
+    FORWARD_MAP[str(copied.message_id)] = m.from_user.id
     save_db(FORWARD_MAP)
 
-    await m.answer("✅ Сообщение отправлено в поддержку.", reply_markup=kb_back_to_menu())
+    await m.answer("✅ Сообщение отправлено в поддержку. Мы ответим сюда же.", reply_markup=kb_back_to_menu())
     await state.clear()
+
+# Операторы отвечают пользователю реплаем в SUPPORT_CHAT_ID
+@dp.message(F.chat.id == SUPPORT_CHAT_ID, F.reply_to_message)
+async def support_reply_to_user(m: Message):
+    replied_id = str(m.reply_to_message.message_id)
+    user_id = FORWARD_MAP.get(replied_id)
+    if not user_id:
+        return
+
+    try:
+        await bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=m.chat.id,
+            message_id=m.message_id
+        )
+    except Exception:
+        # пользователь мог заблокировать бота или закрыть ЛС
+        return
 
 # ================== RUN ==================
 async def main():
@@ -826,4 +884,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
